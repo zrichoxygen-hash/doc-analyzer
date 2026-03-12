@@ -384,6 +384,27 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
         }
 
 
+def upload_file_with_retry(file_path, file_name, max_retries=3):
+    """Upload un fichier avec retry pour mieux tolerer les erreurs reseau transitoires."""
+    last_error = None
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            with open(file_path, "rb") as f:
+                response = client.files.create(
+                    file=(file_name, f),
+                    purpose="user_data"
+                )
+            return response
+        except Exception as e:
+            last_error = e
+            if attempt < max_retries:
+                # backoff simple: 1s, 2s
+                time.sleep(attempt)
+
+    raise last_error
+
+
 def upload_documents(folder_path):
     """Upload tous les documents PDF et PPTX d'un dossier vers l'API OpenAI.
     Le chemin peut être celui d'un dossier local (exécution locale) ou d'un
@@ -439,11 +460,7 @@ def upload_documents(folder_path):
         status_text.text(f"Upload: {file_name}...")
 
         try:
-            with open(file_path, "rb") as f:
-                response = client.files.create(
-                    file=(file_name, f),
-                    purpose="user_data"
-                )
+            response = upload_file_with_retry(file_path, file_name, max_retries=3)
 
             results.append({
                 "file_name": file_name,
