@@ -14,6 +14,10 @@ from PyPDF2 import PdfReader
 from pptx import Presentation
 import pypdfium2 as pdfium
 
+MAX_PDF_PAGES_TO_PROCESS = 12
+MAX_TEXT_CHARS_FOR_EVAL = 60000
+MIN_NATIVE_TEXT_CHARS = 120
+
 # Configuration de la page
 st.set_page_config(page_title="Document Analyzer", layout="wide")
 
@@ -133,6 +137,7 @@ def extract_note(response_text):
 def read_upload_results(filename="upload_results.txt"):
     """Lit le fichier de résultats d'upload pour extraire les IDs de fichiers."""
     results = []
+    seen_files = set()
     
     try:
         with open(filename, "r", encoding="utf-8") as f:
@@ -144,7 +149,9 @@ def read_upload_results(filename="upload_results.txt"):
                 current_file = line.replace("Fichier:", "").strip()
             elif line.startswith("ID:") and current_file:
                 file_id = line.replace("ID:", "").strip()
-                results.append((file_id, current_file))
+                if current_file not in seen_files:
+                    results.append((file_id, current_file))
+                    seen_files.add(current_file)
                 current_file = None
         
         return results
@@ -155,12 +162,25 @@ def read_upload_results(filename="upload_results.txt"):
         return []
 
 
-def ocr_pdf_to_text(file_path):
-    """Effectue un OCR page par page d'un PDF en utilisant GPT-4o-mini Vision."""
+def ocr_pdf_to_text(file_path, max_pages=MAX_PDF_PAGES_TO_PROCESS):
+    """Extrait le texte d'un PDF avec approche hybride: texte natif puis OCR si necessaire."""
     ocr_pages = []
+    pdf_reader = PdfReader(file_path)
     pdf_document = pdfium.PdfDocument(file_path)
+    pages_to_process = min(len(pdf_document), max_pages)
 
-    for page_index in range(len(pdf_document)):
+    for page_index in range(pages_to_process):
+        native_text = ""
+        try:
+            native_text = (pdf_reader.pages[page_index].extract_text() or "").strip()
+        except Exception:
+            native_text = ""
+
+        # Si le texte natif est suffisamment riche, eviter l'OCR (plus rapide)
+        if len(re.sub(r"\s+", "", native_text)) >= MIN_NATIVE_TEXT_CHARS:
+            ocr_pages.append(f"--- Page {page_index + 1} ---\n{native_text}")
+            continue
+
         page = pdf_document[page_index]
 
         # Rendu en image pour OCR (qualite suffisante pour texte de documents académiques)
@@ -171,28 +191,36 @@ def ocr_pdf_to_text(file_path):
         pil_image.save(image_buffer, format="JPEG", quality=90)
         image_b64 = base64.b64encode(image_buffer.getvalue()).decode("ascii")
 
-        ocr_response = client.responses.create(
-            model="gpt-4o-mini",
-            input=[
-                {
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "input_text",
-                            "text": "Fais un OCR fidele de cette page. Retourne uniquement le texte brut, sans commentaire."
-                        },
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:image/jpeg;base64,{image_b64}"
-                        }
-                    ]
-                }
-            ],
-            max_output_tokens=4000
-        )
+        try:
+            ocr_response = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Fais un OCR fidele de cette page. Retourne uniquement le texte brut, sans commentaire."
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/jpeg;base64,{image_b64}"
+                            }
+                        ]
+                    }
+                ],
+                max_output_tokens=1500
+            )
+            page_text = (ocr_response.output_text or "").strip()
+        except Exception:
+            page_text = native_text
 
-        page_text = (ocr_response.output_text or "").strip()
         ocr_pages.append(f"--- Page {page_index + 1} ---\n{page_text}")
+
+    if len(pdf_document) > pages_to_process:
+        ocr_pages.append(
+            f"\n[Document tronque: {len(pdf_document) - pages_to_process} page(s) non traitee(s) pour limiter le temps.]"
+        )
 
     return "\n\n".join(ocr_pages)
 
@@ -216,7 +244,7 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
         
         if file_ext == ".pdf":
             try:
-                # OCR complet de toutes les pages du PDF
+                # OCR hybride: texte natif puis OCR si la page semble scannee
                 extracted_text = ocr_pdf_to_text(file_path)
 
                 # Fallback texte natif si l'OCR ne retourne rien
@@ -260,7 +288,7 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
             f"{evaluation_prompt}\n\n"
             f"Utilise le texte integral ci-dessous pour evaluer le document. "
             f"Retourne obligatoirement une NOTE TOTALE sur 20.\n\n"
-            f"TEXTE INTEGRAL DU DOCUMENT:\n{extracted_text}"
+            f"TEXTE INTEGRAL DU DOCUMENT:\n{extracted_text[:MAX_TEXT_CHARS_FOR_EVAL]}"
         )
         
         response = client.chat.completions.create(
@@ -328,6 +356,7 @@ def upload_documents(folder_path):
 
     # Récupérer les fichiers
     documents = []
+    seen_names = set()
     try:
         for file in os.listdir(folder_path):
             file_path = os.path.join(folder_path, file)
@@ -335,8 +364,9 @@ def upload_documents(folder_path):
             if os.path.isfile(file_path):
                 file_ext = Path(file).suffix.lower()
 
-                if file_ext in ALLOWED_EXTENSIONS:
+                if file_ext in ALLOWED_EXTENSIONS and file not in seen_names:
                     documents.append(file_path)
+                    seen_names.add(file)
 
         documents = sorted(documents)
 
@@ -579,6 +609,7 @@ with col2:
 # Bouton d'évaluation
 st.markdown("---")
 st.subheader("🚀 Lancer l'Évaluation")
+st.caption("Pour eviter les blocages, chaque PDF traite jusqu'a 12 pages en mode hybride (texte natif + OCR si necessaire).")
 
 col_button, col_info = st.columns([1, 2])
 
