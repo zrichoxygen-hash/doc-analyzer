@@ -240,70 +240,72 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
 
 
 def upload_documents(folder_path):
-    """Upload tous les documents PDF et PPTX d'un dossier vers l'API OpenAI."""
-    
+    """Upload tous les documents PDF et PPTX d'un dossier vers l'API OpenAI.
+    Le chemin peut être celui d'un dossier local (exécution locale) ou d'un
+    répertoire temporaire créé par `st.file_uploader`.
+    """
     ALLOWED_EXTENSIONS = {".pdf", ".pptx"}
-    
+
     # Sauvegarder le dossier dans la session
     st.session_state.upload_folder = folder_path
-    
+
     # Vérifier que le dossier existe
     if not os.path.exists(folder_path):
         st.error(f"❌ Le dossier n'existe pas: {folder_path}")
         return
-    
+
     # Récupérer les fichiers
     documents = []
     try:
         for file in os.listdir(folder_path):
             file_path = os.path.join(folder_path, file)
-            
+
             if os.path.isfile(file_path):
                 file_ext = Path(file).suffix.lower()
-                
+
                 if file_ext in ALLOWED_EXTENSIONS:
                     documents.append(file_path)
-        
+
         documents = sorted(documents)
-    
+
     except Exception as e:
         st.error(f"❌ Erreur lors de la lecture du dossier: {e}")
         return
-    
+
     if not documents:
         st.warning(f"⚠️ Aucun fichier PDF ou PPTX trouvé dans: {folder_path}")
         return
-    
+
     st.info(f"📁 {len(documents)} fichier(s) à uploader")
-    
+
     # Uploader les documents
     progress_bar = st.progress(0)
     status_text = st.empty()
-    
+
     results = []
     for idx, file_path in enumerate(documents):
         # Mettre à jour la progress bar
         progress = (idx + 1) / len(documents)
         progress_bar.progress(progress)
-        
+
         file_name = os.path.basename(file_path)
         status_text.text(f"Upload: {file_name}...")
-        
+
         try:
             with open(file_path, "rb") as f:
                 response = client.files.create(
                     file=(file_name, f),
                     purpose="assistants"
                 )
-            
+
             results.append({
                 "file_name": file_name,
                 "file_id": response.id,
                 "status": "✅ Succès"
             })
-            
+
             st.success(f"✅ {file_name}")
-        
+
         except Exception as e:
             results.append({
                 "file_name": file_name,
@@ -311,25 +313,25 @@ def upload_documents(folder_path):
                 "status": f"❌ Erreur"
             })
             st.error(f"❌ {file_name}: {str(e)[:50]}")
-    
+
     progress_bar.empty()
     status_text.empty()
-    
+
     # Sauvegarder les résultats
     try:
         with open("upload_results.txt", "w", encoding="utf-8") as f:
             f.write("RÉSULTATS DE L'UPLOAD EN BATCH\n")
             f.write("=" * 60 + "\n\n")
-            
+
             for result in results:
                 f.write(f"Fichier: {result['file_name']}\n")
                 f.write(f"Statut: {result['status']}\n")
                 if result['file_id']:
                     f.write(f"ID: {result['file_id']}\n")
                 f.write("\n")
-        
+
         st.success(f"💾 Résultats sauvegardés dans upload_results.txt")
-    
+
     except Exception as e:
         st.error(f"⚠️ Erreur lors de la sauvegarde: {e}")
 
@@ -424,20 +426,45 @@ st.markdown("---")
 # ===== SECTION UPLOAD =====
 st.subheader("📤 Upload des Documents")
 
-col_upload_path, col_upload_btn = st.columns([3, 1])
+st.markdown("*Vous pouvez soit sélectionner plusieurs fichiers PDF/PPTX, soit téléverser un **dossier compressé (.zip)** contenant tous les documents.*")
 
-with col_upload_path:
-    upload_folder = st.text_input(
-        "Chemin du dossier contenant les documents:",
-        value=r"C:\Users\hp\Downloads\Documents a analyser",
-        help="Indiquez le chemin vers le dossier avec les fichiers PDF et PPTX"
-    )
+# uploader multiple files
+uploaded_files = st.file_uploader(
+    "Choisissez des fichiers PDF/PPTX ou un zip de dossier :",
+    type=["pdf", "pptx", "zip"],
+    accept_multiple_files=True
+)
 
-with col_upload_btn:
-    st.write("")  # Spacing
-    if st.button("📤 Uploader les Documents", use_container_width=True):
-        with st.spinner("Upload en cours..."):
-            upload_documents(upload_folder)
+if uploaded_files:
+    if st.button("📤 Uploader et traiter"):
+        with st.spinner("Préparation des fichiers..."):
+            temp_dir = "./_tmp_uploads"
+            os.makedirs(temp_dir, exist_ok=True)
+
+            # vider le répertoire temporaire pour éviter mélanges
+            for existing in os.listdir(temp_dir):
+                path = os.path.join(temp_dir, existing)
+                if os.path.isfile(path):
+                    os.remove(path)
+                else:
+                    import shutil
+                    shutil.rmtree(path)
+
+            # sauvegarder les uploads et décompresser si nécessaire
+            import zipfile
+            for up in uploaded_files:
+                dest_path = os.path.join(temp_dir, up.name)
+                with open(dest_path, "wb") as f:
+                    f.write(up.getbuffer())
+
+                if up.name.lower().endswith(".zip"):
+                    try:
+                        with zipfile.ZipFile(dest_path, "r") as z:
+                            z.extractall(temp_dir)
+                    except Exception as e:
+                        st.error(f"Erreur lors de l'extraction du zip: {e}")
+            # lancer l'upload sur le contenu du dossier temporaire
+            upload_documents(temp_dir)
 
 st.markdown("---")
 
