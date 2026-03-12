@@ -7,6 +7,7 @@ from tqdm import tqdm
 import pandas as pd
 import re
 import time
+import json
 from PyPDF2 import PdfReader
 from pptx import Presentation
 
@@ -32,6 +33,41 @@ if not api_key:
     st.stop()
 
 client = OpenAI(api_key=api_key)
+
+# ===== FONCTION DE PERSISTANCE DES CRITÈRES =====
+CRITERIA_FILE = "saved_criteria.json"
+
+def load_criteria():
+    """Charge les critères sauvegardés ou retourne les critères par défaut."""
+    if Path(CRITERIA_FILE).exists():
+        try:
+            with open(CRITERIA_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                return data.get("criteria", get_default_criteria())
+        except:
+            return get_default_criteria()
+    return get_default_criteria()
+
+def get_default_criteria():
+    """Retourne les critères par défaut."""
+    return """Veuillez évaluer ce document académique sur la base des 5 critères suivants et attribuer une note totale sur 20 points (4 points par critère).
+
+Les critères sont:
+1. Plan adopté (4 pts) - Cohérence et organisation logique du contenu
+2. Design des slides (4 pts) - Esthétique, lisibilité et qualité de la présentation visuelle
+3. Référencement (4 pts) - Utilisation correcte des normes (APA ou autre) pour les sources
+4. Existence de chiffres, tableaux ou graphiques (4 pts) - Présence et pertinence des éléments visuels de données
+5. Richesse des informations (4 pts) - Profondeur du contenu, vocabulaire technique approprié et attesté par les références
+
+Veuillez fournir:
+- Une analyse succincte pour chaque critère (1-2 lignes max)
+- La note obtenue pour chaque critère (0-4)
+- La note totale sur 20"""
+
+def save_criteria(criteria_text):
+    """Sauvegarde les critères modifiés dans un fichier JSON."""
+    with open(CRITERIA_FILE, "w", encoding="utf-8") as f:
+        json.dump({"criteria": criteria_text}, f, ensure_ascii=False, indent=2)
 
 # ===== DÉFINITION DES FONCTIONS =====
 
@@ -375,38 +411,7 @@ def evaluate_documents(evaluation_prompt):
 
 # Initialiser l'état de session
 if "criteria" not in st.session_state:
-    st.session_state.criteria = """Veuillez évaluer ce document académique sur la base des 5 critères suivants et attribuer une note totale sur 20 points (4 points par critère).
-
-Les critères sont:
-1. Plan adopté (4 pts) - Cohérence et organisation logique du contenu
-2. Design des slides (4 pts) - Esthétique, lisibilité et qualité de la présentation visuelle
-3. Référencement (4 pts) - Utilisation correcte des normes (APA ou autre) pour les sources
-4. Existence de chiffres, tableaux ou graphiques (4 pts) - Présence et pertinence des éléments visuels de données
-5. Richesse des informations (4 pts) - Profondeur du contenu, vocabulaire technique approprié et attesté par les références
-
-Veuillez fournir:
-- Une analyse succincte pour chaque critère (1-2 lignes max)
-- La note obtenue pour chaque critère (0-4)
-- La note totale sur 20
-- Format de réponse strict:
-
-CRITÈRE 1 - PLAN: [note]/4
-[analyse succincte]
-
-CRITÈRE 2 - DESIGN: [note]/4
-[analyse succincte]
-
-CRITÈRE 3 - RÉFÉRENCEMENT: [note]/4
-[analyse succincte]
-
-CRITÈRE 4 - DONNÉES VISUELLES: [note]/4
-[analyse succincte]
-
-CRITÈRE 5 - RICHESSE: [note]/4
-[analyse succincte]
-
-NOTE TOTALE: [note]/20
-"""
+    st.session_state.criteria = load_criteria()
 
 if "chat_history" not in st.session_state:
     st.session_state.chat_history = []
@@ -508,8 +513,9 @@ with col1:
             assistant_response = response.choices[0].message.content
             st.session_state.chat_history.append({"role": "assistant", "content": assistant_response})
             
-            # Mettre à jour les critères
+            # Mettre à jour les critères et sauvegarder
             st.session_state.criteria = assistant_response
+            save_criteria(assistant_response)
             
         except Exception as e:
             st.error(f"Erreur API: {str(e)}")
@@ -529,6 +535,8 @@ with col2:
     # Mettre à jour les critères s'ils sont modifiés
     if updated_criteria != st.session_state.criteria:
         st.session_state.criteria = updated_criteria
+        save_criteria(updated_criteria)  # Sauvegarder automatiquement
+        st.success("✅ Critères sauvegardés!")
 
 # Bouton d'évaluation
 st.markdown("---")
