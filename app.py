@@ -17,20 +17,18 @@ st.set_page_config(page_title="Document Analyzer", layout="wide")
 load_dotenv("API.env")
 
 # Initialiser le client OpenAI
-# En priorité: utilise Streamlit Secrets, sinon fichier .env
-api_key = None
-try:
-    # Essayer Streamlit Secrets (pour le cloud)
-    api_key = st.secrets.get("OPENAI_API_KEY")
-except:
-    pass
+# En priorité: variables d'environnement (Render), sinon Streamlit Secrets (local dev)
+api_key = os.getenv("OPENAI_API_KEY")
 
 if not api_key:
-    # Fallback sur fichier .env (pour local)
-    api_key = os.getenv("OPENAI_API_KEY")
+    try:
+        # Fallback sur Streamlit Secrets pour dev local avec secrets.toml
+        api_key = st.secrets.get("OPENAI_API_KEY")
+    except:
+        pass
 
 if not api_key:
-    st.error("❌ Clé API OpenAI non trouvée! Configurez OPENAI_API_KEY dans les Secrets Streamlit ou API.env")
+    st.error("❌ Clé API OpenAI non trouvée! Configurez OPENAI_API_KEY en variable d'environnement (Render) ou dans Secrets Streamlit/API.env (local)")
     st.stop()
 
 client = OpenAI(api_key=api_key)
