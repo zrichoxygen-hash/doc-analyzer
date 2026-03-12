@@ -8,8 +8,11 @@ import pandas as pd
 import re
 import time
 import json
+import io
+import base64
 from PyPDF2 import PdfReader
 from pptx import Presentation
+import pypdfium2 as pdfium
 
 # Configuration de la page
 st.set_page_config(page_title="Document Analyzer", layout="wide")
@@ -152,6 +155,48 @@ def read_upload_results(filename="upload_results.txt"):
         return []
 
 
+def ocr_pdf_to_text(file_path):
+    """Effectue un OCR page par page d'un PDF en utilisant GPT-4o-mini Vision."""
+    ocr_pages = []
+    pdf_document = pdfium.PdfDocument(file_path)
+
+    for page_index in range(len(pdf_document)):
+        page = pdf_document[page_index]
+
+        # Rendu en image pour OCR (qualite suffisante pour texte de documents académiques)
+        bitmap = page.render(scale=2.0)
+        pil_image = bitmap.to_pil()
+
+        image_buffer = io.BytesIO()
+        pil_image.save(image_buffer, format="JPEG", quality=90)
+        image_b64 = base64.b64encode(image_buffer.getvalue()).decode("ascii")
+
+        ocr_response = client.responses.create(
+            model="gpt-4o-mini",
+            input=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "input_text",
+                            "text": "Fais un OCR fidele de cette page. Retourne uniquement le texte brut, sans commentaire."
+                        },
+                        {
+                            "type": "input_image",
+                            "image_url": f"data:image/jpeg;base64,{image_b64}"
+                        }
+                    ]
+                }
+            ],
+            max_output_tokens=4000
+        )
+
+        page_text = (ocr_response.output_text or "").strip()
+        ocr_pages.append(f"--- Page {page_index + 1} ---\n{page_text}")
+
+    return "\n\n".join(ocr_pages)
+
+
 def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=None):
     """Évalue un document en utilisant l'API OpenAI avec GPT-4 Vision."""
     first_name, last_name = parse_filename(file_name)
@@ -166,44 +211,29 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
         if not os.path.exists(file_path):
             raise FileNotFoundError(f"Fichier non trouvé: {file_path}")
         
-        content = [
-            {
-                "type": "text",
-                "text": evaluation_prompt
-            }
-        ]
-        
         file_ext = Path(file_name).suffix.lower()
+        extracted_text = ""
         
         if file_ext == ".pdf":
             try:
-                pdf_reader = PdfReader(file_path)
-                text_content = "Contenu du PDF:\n"
-                
-                max_pages = min(5, len(pdf_reader.pages))
-                for page_num in range(max_pages):
-                    try:
-                        page = pdf_reader.pages[page_num]
-                        text_content += f"\n--- Page {page_num + 1} ---\n"
-                        text_content += page.extract_text() + "\n"
-                    except:
-                        pass
-                
-                content.append({
-                    "type": "text",
-                    "text": text_content[:3000]
-                })
+                # OCR complet de toutes les pages du PDF
+                extracted_text = ocr_pdf_to_text(file_path)
+
+                # Fallback texte natif si l'OCR ne retourne rien
+                if not extracted_text.strip():
+                    pdf_reader = PdfReader(file_path)
+                    fallback_text_parts = []
+                    for page_num, page in enumerate(pdf_reader.pages, start=1):
+                        fallback_text_parts.append(f"--- Page {page_num} ---\n{page.extract_text() or ''}")
+                    extracted_text = "\n\n".join(fallback_text_parts)
             except Exception as pdf_error:
-                content.append({
-                    "type": "text",
-                    "text": f"Document PDF: {file_name}. Veuillez analyser ce document académique."
-                })
+                extracted_text = f"OCR indisponible pour {file_name}. Erreur: {str(pdf_error)}"
         
         elif file_ext == ".pptx":
             try:
                 prs = Presentation(file_path)
                 text_content = "Contenu de la présentation:\n"
-                slide_count = min(5, len(prs.slides))
+                slide_count = len(prs.slides)
                 
                 for slide_idx in range(slide_count):
                     try:
@@ -218,24 +248,32 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
                                 pass
                     except:
                         continue
-                
-                content.append({
-                    "type": "text",
-                    "text": text_content[:3000]
-                })
+
+                extracted_text = text_content
             except Exception as pptx_error:
-                content.append({
-                    "type": "text",
-                    "text": f"Document PPTX: {file_name}. Veuillez analyser ce document de présentation académique."
-                })
+                extracted_text = f"Document PPTX: {file_name}. Erreur d'extraction: {str(pptx_error)}"
+
+        else:
+            extracted_text = f"Format non supporte pour extraction: {file_name}"
+
+        user_prompt = (
+            f"{evaluation_prompt}\n\n"
+            f"Utilise le texte integral ci-dessous pour evaluer le document. "
+            f"Retourne obligatoirement une NOTE TOTALE sur 20.\n\n"
+            f"TEXTE INTEGRAL DU DOCUMENT:\n{extracted_text}"
+        )
         
         response = client.chat.completions.create(
             model="gpt-4o",
             max_tokens=1024,
             messages=[
                 {
+                    "role": "system",
+                    "content": "Tu es un evaluateur academique. Reponds avec une evaluation structuree et une ligne finale 'NOTE TOTALE: X/20'."
+                },
+                {
                     "role": "user",
-                    "content": content
+                    "content": user_prompt
                 }
             ]
         )
