@@ -8,15 +8,11 @@ import pandas as pd
 import re
 import time
 import json
-import io
-import base64
 from PyPDF2 import PdfReader
 from pptx import Presentation
-import pypdfium2 as pdfium
+from typing import Optional
 
-MAX_PDF_PAGES_TO_PROCESS = 12
 MAX_TEXT_CHARS_FOR_EVAL = 60000
-MIN_NATIVE_TEXT_CHARS = 120
 
 # Configuration de la page
 st.set_page_config(page_title="Document Analyzer", layout="wide")
@@ -162,67 +158,54 @@ def read_upload_results(filename="upload_results.txt"):
         return []
 
 
-def ocr_pdf_to_text(file_path, max_pages=MAX_PDF_PAGES_TO_PROCESS):
-    """Extrait le texte d'un PDF avec approche hybride: texte natif puis OCR si necessaire."""
-    ocr_pages = []
-    pdf_reader = PdfReader(file_path)
-    pdf_document = pdfium.PdfDocument(file_path)
-    pages_to_process = min(len(pdf_document), max_pages)
+def extract_text_with_openai_file(file_id: str, file_ext: str) -> Optional[str]:
+    """Extrait du texte via OpenAI en utilisant le fichier deja uploadé (OCR pour PDF cote API)."""
+    if not file_id:
+        return None
 
-    for page_index in range(pages_to_process):
-        native_text = ""
-        try:
-            native_text = (pdf_reader.pages[page_index].extract_text() or "").strip()
-        except Exception:
-            native_text = ""
+    extraction_instruction = (
+        "Fais une extraction fidele et complete du texte du document. "
+        "Retourne uniquement le texte brut, sans resume, sans commentaire."
+    )
 
-        # Si le texte natif est suffisamment riche, eviter l'OCR (plus rapide)
-        if len(re.sub(r"\s+", "", native_text)) >= MIN_NATIVE_TEXT_CHARS:
-            ocr_pages.append(f"--- Page {page_index + 1} ---\n{native_text}")
-            continue
-
-        page = pdf_document[page_index]
-
-        # Rendu en image pour OCR (qualite suffisante pour texte de documents académiques)
-        bitmap = page.render(scale=2.0)
-        pil_image = bitmap.to_pil()
-
-        image_buffer = io.BytesIO()
-        pil_image.save(image_buffer, format="JPEG", quality=90)
-        image_b64 = base64.b64encode(image_buffer.getvalue()).decode("ascii")
-
-        try:
-            ocr_response = client.responses.create(
-                model="gpt-4o-mini",
-                input=[
-                    {
-                        "role": "user",
-                        "content": [
-                            {
-                                "type": "input_text",
-                                "text": "Fais un OCR fidele de cette page. Retourne uniquement le texte brut, sans commentaire."
-                            },
-                            {
-                                "type": "input_image",
-                                "image_url": f"data:image/jpeg;base64,{image_b64}"
-                            }
-                        ]
-                    }
+    # Le PDF sera OCRise automatiquement cote OpenAI.
+    response = client.responses.create(
+        model="gpt-4o-mini",
+        input=[
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": extraction_instruction},
+                    {"type": "input_file", "file_id": file_id},
                 ],
-                max_output_tokens=1500
-            )
-            page_text = (ocr_response.output_text or "").strip()
-        except Exception:
-            page_text = native_text
+            }
+        ],
+        max_output_tokens=8000,
+        timeout=120,
+    )
+    return (response.output_text or "").strip()
 
-        ocr_pages.append(f"--- Page {page_index + 1} ---\n{page_text}")
 
-    if len(pdf_document) > pages_to_process:
-        ocr_pages.append(
-            f"\n[Document tronque: {len(pdf_document) - pages_to_process} page(s) non traitee(s) pour limiter le temps.]"
-        )
+def extract_text_locally(file_path, file_ext):
+    """Fallback local si l'extraction via OpenAI file echoue."""
+    if file_ext == ".pdf":
+        pdf_reader = PdfReader(file_path)
+        pages = []
+        for page_num, page in enumerate(pdf_reader.pages, start=1):
+            pages.append(f"--- Page {page_num} ---\n{page.extract_text() or ''}")
+        return "\n\n".join(pages)
 
-    return "\n\n".join(ocr_pages)
+    if file_ext == ".pptx":
+        prs = Presentation(file_path)
+        text_content = []
+        for slide_idx, slide in enumerate(prs.slides, start=1):
+            text_content.append(f"--- Slide {slide_idx} ---")
+            for shape in slide.shapes:
+                if hasattr(shape, "text") and shape.text:
+                    text_content.append(shape.text)
+        return "\n".join(text_content)
+
+    return ""
 
 
 def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=None):
@@ -242,47 +225,19 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
         file_ext = Path(file_name).suffix.lower()
         extracted_text = ""
         
-        if file_ext == ".pdf":
-            try:
-                # OCR hybride: texte natif puis OCR si la page semble scannee
-                extracted_text = ocr_pdf_to_text(file_path)
-
-                # Fallback texte natif si l'OCR ne retourne rien
-                if not extracted_text.strip():
-                    pdf_reader = PdfReader(file_path)
-                    fallback_text_parts = []
-                    for page_num, page in enumerate(pdf_reader.pages, start=1):
-                        fallback_text_parts.append(f"--- Page {page_num} ---\n{page.extract_text() or ''}")
-                    extracted_text = "\n\n".join(fallback_text_parts)
-            except Exception as pdf_error:
-                extracted_text = f"OCR indisponible pour {file_name}. Erreur: {str(pdf_error)}"
-        
-        elif file_ext == ".pptx":
-            try:
-                prs = Presentation(file_path)
-                text_content = "Contenu de la présentation:\n"
-                slide_count = len(prs.slides)
-                
-                for slide_idx in range(slide_count):
-                    try:
-                        slide = prs.slides[slide_idx]
-                        text_content += f"\n--- Slide {slide_idx + 1} ---\n"
-                        
-                        for shape in slide.shapes:
-                            try:
-                                if hasattr(shape, "text") and shape.text:
-                                    text_content += shape.text + "\n"
-                            except:
-                                pass
-                    except:
-                        continue
-
-                extracted_text = text_content
-            except Exception as pptx_error:
-                extracted_text = f"Document PPTX: {file_name}. Erreur d'extraction: {str(pptx_error)}"
-
-        else:
+        if file_ext not in {".pdf", ".pptx"}:
             extracted_text = f"Format non supporte pour extraction: {file_name}"
+        else:
+            try:
+                extracted_text = extract_text_with_openai_file(file_id, file_ext) or ""
+            except Exception:
+                extracted_text = ""
+
+            if not extracted_text.strip():
+                try:
+                    extracted_text = extract_text_locally(file_path, file_ext)
+                except Exception as local_error:
+                    extracted_text = f"Extraction indisponible pour {file_name}. Erreur: {str(local_error)}"
 
         user_prompt = (
             f"{evaluation_prompt}\n\n"
@@ -294,6 +249,7 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
         response = client.chat.completions.create(
             model="gpt-4o",
             max_tokens=1024,
+            timeout=120,
             messages=[
                 {
                     "role": "system",
@@ -609,7 +565,7 @@ with col2:
 # Bouton d'évaluation
 st.markdown("---")
 st.subheader("🚀 Lancer l'Évaluation")
-st.caption("Pour eviter les blocages, chaque PDF traite jusqu'a 12 pages en mode hybride (texte natif + OCR si necessaire).")
+st.caption("PDF: OCR effectue cote OpenAI sur le fichier uploade, puis evaluation du texte extrait complet.")
 
 col_button, col_info = st.columns([1, 2])
 
