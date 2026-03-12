@@ -8,11 +8,14 @@ import pandas as pd
 import re
 import time
 import json
+import io
+import base64
 from PyPDF2 import PdfReader
 from pptx import Presentation
 from typing import Optional
+import pypdfium2 as pdfium
 
-MAX_TEXT_CHARS_FOR_EVAL = 60000
+
 
 # Configuration de la page
 st.set_page_config(page_title="Document Analyzer", layout="wide")
@@ -36,6 +39,8 @@ if not api_key:
     st.stop()
 
 client = OpenAI(api_key=api_key)
+
+MAX_DIRECT_EVAL_CHARS = 120000
 
 # ===== FONCTION DE PERSISTANCE DES CRITÈRES =====
 CRITERIA_FILE = "saved_criteria.json"
@@ -186,6 +191,82 @@ def extract_text_with_openai_file(file_id: str, file_ext: str) -> Optional[str]:
     return (response.output_text or "").strip()
 
 
+def ocr_pdf_with_vision(file_path):
+    """OCR page par page d'un PDF scanne via vision OpenAI (sans limite de pages)."""
+    extracted_pages = []
+    pdf_document = pdfium.PdfDocument(file_path)
+
+    for page_idx in range(len(pdf_document)):
+        page = pdf_document[page_idx]
+        bitmap = page.render(scale=2.0)
+        image = bitmap.to_pil()
+
+        buffer = io.BytesIO()
+        image.save(buffer, format="JPEG", quality=90)
+        image_b64 = base64.b64encode(buffer.getvalue()).decode("ascii")
+
+        try:
+            response = client.responses.create(
+                model="gpt-4o-mini",
+                input=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "input_text",
+                                "text": "Fais un OCR complet et fidele de cette page. Retourne uniquement le texte brut."
+                            },
+                            {
+                                "type": "input_image",
+                                "image_url": f"data:image/jpeg;base64,{image_b64}"
+                            },
+                        ],
+                    }
+                ],
+                max_output_tokens=2000,
+                timeout=120,
+            )
+            page_text = (response.output_text or "").strip()
+        except Exception:
+            page_text = ""
+
+        extracted_pages.append(f"--- Page {page_idx + 1} ---\n{page_text}")
+
+    return "\n\n".join(extracted_pages)
+
+
+def compress_text_for_evaluation(full_text):
+    """Evite les timeouts sur tres gros documents sans ignorer des pages."""
+    if len(full_text) <= MAX_DIRECT_EVAL_CHARS:
+        return full_text
+
+    chunk_size = 60000
+    summaries = []
+    for i in range(0, len(full_text), chunk_size):
+        chunk = full_text[i:i + chunk_size]
+        try:
+            summary_response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                timeout=120,
+                max_tokens=800,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": "Tu resumes fidelement un extrait de document academique en conservant faits, references, chiffres et arguments."
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Resumer fidèlement cet extrait sans inventer:\n\n{chunk}"
+                    },
+                ],
+            )
+            summaries.append(summary_response.choices[0].message.content or "")
+        except Exception:
+            summaries.append(chunk[:2000])
+
+    return "\n\n".join(summaries)
+
+
 def extract_text_locally(file_path, file_ext):
     """Fallback local si l'extraction via OpenAI file echoue."""
     if file_ext == ".pdf":
@@ -193,7 +274,15 @@ def extract_text_locally(file_path, file_ext):
         pages = []
         for page_num, page in enumerate(pdf_reader.pages, start=1):
             pages.append(f"--- Page {page_num} ---\n{page.extract_text() or ''}")
-        return "\n\n".join(pages)
+
+        native_text = "\n\n".join(pages).strip()
+        # Si PDF scanne, tenter OCR vision page par page
+        if len(re.sub(r"\s+", "", native_text)) < 300:
+            ocr_text = ocr_pdf_with_vision(file_path)
+            if ocr_text.strip():
+                return ocr_text
+
+        return native_text
 
     if file_ext == ".pptx":
         prs = Presentation(file_path)
@@ -243,7 +332,7 @@ def evaluate_document(file_id, file_name, evaluation_prompt, documents_folder=No
             f"{evaluation_prompt}\n\n"
             f"Utilise le texte integral ci-dessous pour evaluer le document. "
             f"Retourne obligatoirement une NOTE TOTALE sur 20.\n\n"
-            f"TEXTE INTEGRAL DU DOCUMENT:\n{extracted_text[:MAX_TEXT_CHARS_FOR_EVAL]}"
+            f"TEXTE INTEGRAL DU DOCUMENT:\n{compress_text_for_evaluation(extracted_text)}"
         )
         
         response = client.chat.completions.create(
@@ -353,7 +442,7 @@ def upload_documents(folder_path):
             with open(file_path, "rb") as f:
                 response = client.files.create(
                     file=(file_name, f),
-                    purpose="assistants"
+                    purpose="user_data"
                 )
 
             results.append({
@@ -454,6 +543,7 @@ st.markdown("---")
 st.subheader("📤 Upload des Documents")
 
 st.markdown("*Vous pouvez soit sélectionner plusieurs fichiers PDF/PPTX, soit téléverser un **dossier compressé (.zip)** contenant tous les documents.*")
+st.caption("Si un PDF est volumineux, preferez un upload unitaire ou un ZIP pour une meilleure stabilite sur Render.")
 
 # uploader multiple files
 uploaded_files = st.file_uploader(
@@ -462,8 +552,10 @@ uploaded_files = st.file_uploader(
     accept_multiple_files=True
 )
 
-if uploaded_files:
-    if st.button("📤 Uploader et traiter"):
+if st.button("📤 Uploader et traiter"):
+    if not uploaded_files:
+        st.warning("Ajoutez au moins un fichier local.")
+    else:
         with st.spinner("Préparation des fichiers..."):
             temp_dir = "./_tmp_uploads"
             os.makedirs(temp_dir, exist_ok=True)
@@ -481,8 +573,17 @@ if uploaded_files:
             import zipfile
             for up in uploaded_files:
                 dest_path = os.path.join(temp_dir, up.name)
-                with open(dest_path, "wb") as f:
-                    f.write(up.getbuffer())
+
+                # Ecriture en chunks pour limiter les pics memoire
+                try:
+                    with open(dest_path, "wb") as f:
+                        while True:
+                            chunk = up.read(1024 * 1024)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                finally:
+                    up.seek(0)
 
                 if up.name.lower().endswith(".zip"):
                     try:
@@ -490,6 +591,7 @@ if uploaded_files:
                             z.extractall(temp_dir)
                     except Exception as e:
                         st.error(f"Erreur lors de l'extraction du zip: {e}")
+
             # lancer l'upload sur le contenu du dossier temporaire
             upload_documents(temp_dir)
 
@@ -609,7 +711,9 @@ if st.session_state.results:
     # Télécharger Excel
     if st.button("💾 Télécharger en Excel"):
         filename = "evaluations_results.xlsx"
-        df_results[["Prénom", "Nom", "Note /20"]].to_excel(filename, index=False)
+        export_df = df_results[["first_name", "last_name", "note"]].copy()
+        export_df.columns = ["Prénom", "Nom", "Note /20"]
+        export_df.to_excel(filename, index=False)
         
         with open(filename, "rb") as f:
             st.download_button(
