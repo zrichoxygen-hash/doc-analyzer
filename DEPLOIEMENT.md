@@ -46,7 +46,32 @@ L'app sera accessible via: `https://doc-analyzer-[code-aléatoire].streamlit.app
 
 ---
 
-## Option 2: Déploiement local persistant
+## Option 2: Déploiement sur Render
+
+Le projet inclut un fichier `render.yaml` prêt à l'emploi.
+
+### Étapes
+
+1. Poussez le code vers GitHub.
+2. Sur Render: **New +** → **Blueprint**.
+3. Sélectionnez votre repository.
+4. Render détecte automatiquement `render.yaml`.
+5. Ajoutez la variable d'environnement suivante dans Render:
+  - `OPENAI_API_KEY` = votre clé API OpenAI
+6. Lancez le déploiement.
+
+### Commandes configurées
+
+- Build: `pip install -r requirements.txt`
+- Start: `streamlit run app.py --server.address 0.0.0.0 --server.port $PORT --server.headless true`
+
+### Important
+
+- Le disque Render est éphémère: les fichiers générés localement (résultats d'upload, exports Excel) peuvent être perdus après redémarrage.
+
+---
+
+## Option 3: Déploiement local persistant
 
 Si vous avez un serveur toujours allumé, lancez:
 

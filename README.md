@@ -126,6 +126,30 @@ DOC ANALYSER/
 4. **Exporter**
    - Cliquez "💾 Télécharger en Excel"
 
+## Déploiement sur Render
+
+Ce dépôt est maintenant prêt pour Render avec le fichier `render.yaml`.
+
+### Étapes
+
+1. Poussez le projet sur GitHub (si ce n'est pas déjà fait).
+2. Dans Render, cliquez **New +** → **Blueprint**.
+3. Connectez votre repo GitHub `doc-analyzer`.
+4. Render détectera automatiquement `render.yaml` et proposera un service web Python.
+5. Dans les variables d'environnement, renseignez:
+   - `OPENAI_API_KEY` = votre clé OpenAI
+6. Lancez le déploiement.
+
+### Configuration utilisée
+
+- Build command: `pip install -r requirements.txt`
+- Start command: `streamlit run app.py --server.address 0.0.0.0 --server.port $PORT --server.headless true`
+
+### Notes Render
+
+- Le système de fichiers Render est **éphémère**: les fichiers générés (`upload_results.txt`, Excel export) ne sont pas persistants entre redémarrages.
+- Pour un usage stable en production, stockez les sorties importantes dans un stockage externe (S3, base de données, etc.).
+
 ## Coûts
 
 - **Streamlit Cloud**: Gratuit
